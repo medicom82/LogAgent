@@ -1,0 +1,149 @@
+version: '3.8'
+
+services:
+  # MySQL Database
+  mysql:
+    image: mysql:8.0
+    container_name: logagent-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: root_password
+      MYSQL_DATABASE: logagent
+      MYSQL_USER: logagent
+      MYSQL_PASSWORD: logagent_password
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+      - ./database/init.sql:/docker-entrypoint-initdb.d/02-init.sql
+    networks:
+      - logagent-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Zookeeper (Required for Kafka)
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: logagent-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    networks:
+      - logagent-network
+
+  # Kafka Broker
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: logagent-kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "9101:9101"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'false'
+    networks:
+      - logagent-network
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions.sh", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Kafka UI (optional)
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: logagent-kafka-ui
+    depends_on:
+      - kafka
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: logagent
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+    networks:
+      - logagent-network
+
+  # Apache Flink JobManager
+  flink-jobmanager:
+    image: flink:1.18.0-scala_2.12-java11
+    container_name: logagent-flink-jobmanager
+    command: jobmanager
+    ports:
+      - "6123:6123"
+      - "8081:8081"
+    environment:
+      - JOB_MANAGER_RPC_ADDRESS=flink-jobmanager
+      - FLINK_PROPERTIES=jobmanager.rpc.port:6123
+    volumes:
+      - ./flink/job.py:/opt/flink/job.py
+    networks:
+      - logagent-network
+    depends_on:
+      - kafka
+
+  # Apache Flink TaskManager
+  flink-taskmanager:
+    image: flink:1.18.0-scala_2.12-java11
+    container_name: logagent-flink-taskmanager
+    command: taskmanager
+    ports:
+      - "6124:6124"
+      - "6125:6125"
+    environment:
+      - JOB_MANAGER_RPC_ADDRESS=flink-jobmanager
+      - FLINK_PROPERTIES=jobmanager.rpc.port:6123
+    networks:
+      - logagent-network
+    depends_on:
+      - flink-jobmanager
+      - kafka
+
+  # Python Services (Log Collectors & Processors)
+  logagent-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: logagent-app
+    ports:
+      - "5000:5000"
+      - "5001:5001"
+    environment:
+      MYSQL_HOST: mysql
+      MYSQL_USER: logagent
+      MYSQL_PASSWORD: logagent_password
+      MYSQL_DATABASE: logagent
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      FLASK_ENV: development
+    volumes:
+      - ./:/app
+    networks:
+      - logagent-network
+    depends_on:
+      mysql:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    command: sh -c "python -c 'from database.init import init_db; init_db()' && python app.py"
+
+volumes:
+  mysql_data:
+
+networks:
+  logagent-network:
+    driver: bridge
