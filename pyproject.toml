@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "logagent"
+version = "1.0.0"
+description = "Real-time log analysis system with anomaly detection and Gemini AI integration"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "medicom82" }]
+keywords = ["logs", "anomaly-detection", "security", "kafka", "gemini"]
+dependencies = [
+    "python-dotenv>=1.0",
+    "PyYAML>=6.0",
+    "pydantic>=2.0",
+    "mysql-connector-python>=8.0.33",
+    "kafka-python>=2.0.2",
+    "paramiko>=3.3",
+    "numpy>=1.24",
+    "scikit-learn>=1.3",
+    "flask>=3.0",
+    "flask-cors>=4.0",
+    "google-generativeai>=0.3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+logagent = "cli:main"
+
+[tool.setuptools]
+# NOTE: the local `kafka/` directory is deliberately NOT packaged. Its module
+# shadows the external `kafka-python` package (kafka/producer.py itself does
+# `from kafka import KafkaProducer`), so shipping it in the wheel would collide
+# with kafka-python in site-packages.
+packages = ["collectors", "processors", "database", "dashboard"]
+py-modules = ["cli", "logparser"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 120

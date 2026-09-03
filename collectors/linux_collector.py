@@ -1,13 +1,13 @@
 """Linux Log Collector Module"""
 
 import os
-import re
 import logging
-from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Optional
 import paramiko
 from kafka import KafkaProducer
 import json
+
+import logparser
 
 logger = logging.getLogger(__name__)
 
@@ -246,85 +246,31 @@ class LinuxLogCollector:
         
         return logs_collected
     
-    def _parse_apache_log(self, line: str) -> Dict:
-        """Parse Apache access log line"""
-        try:
-            # Apache Combined Log Format
-            pattern = r'(\S+) \S+ (\S+) \[([^\]]+)\] "(\S+) (\S+) (\S+)" (\d+) (\S+) "([^"]*)" "([^"]*)"'
-            match = re.match(pattern, line)
-            
-            if match:
-                source_ip, user, timestamp, method, path, protocol, status_code, bytes_sent, referer, user_agent = match.groups()
-                
-                return {
-                    'timestamp': datetime.now().isoformat(),
-                    'server_id': self.server_id,
-                    'log_type': 'apache',
-                    'source_ip': source_ip,
-                    'user': user if user != '-' else None,
-                    'method': method,
-                    'path': path,
-                    'status_code': int(status_code),
-                    'bytes_sent': int(bytes_sent) if bytes_sent != '-' else 0,
-                    'referer': referer if referer != '-' else None,
-                    'user_agent': user_agent,
-                    'raw_log_line': line
-                }
-        except Exception as e:
-            logger.debug(f"Error parsing Apache log: {e}")
-        
-        return None
-    
-    def _parse_mysql_log(self, line: str) -> Dict:
-        """Parse MySQL log line"""
-        try:
-            # MySQL general query log format
-            pattern = r'(\d+)-(\d+)-(\d+)\s+(\d+):(\d+):(\d+)\s+(\d+)\s+Query\s+(.+)'
-            match = re.match(pattern, line)
-            
-            if match:
-                year, month, day, hour, minute, second, thread_id, query = match.groups()
-                
-                return {
-                    'timestamp': datetime.now().isoformat(),
-                    'server_id': self.server_id,
-                    'log_type': 'mysql',
-                    'query': query,
-                    'thread_id': int(thread_id),
-                    'raw_log_line': line
-                }
-        except Exception as e:
-            logger.debug(f"Error parsing MySQL log: {e}")
-        
-        return None
-    
-    def _parse_audit_log(self, line: str) -> Dict:
-        """Parse Linux audit log line"""
-        try:
-            return {
-                'timestamp': datetime.now().isoformat(),
-                'server_id': self.server_id,
-                'log_type': 'audit',
-                'raw_log_line': line
-            }
-        except Exception as e:
-            logger.debug(f"Error parsing audit log: {e}")
-        
-        return None
-    
-    def _parse_system_log(self, line: str, log_type: str) -> Dict:
-        """Parse system log line (syslog, auth.log)"""
-        try:
-            return {
-                'timestamp': datetime.now().isoformat(),
-                'server_id': self.server_id,
-                'log_type': log_type,
-                'raw_log_line': line
-            }
-        except Exception as e:
-            logger.debug(f"Error parsing system log: {e}")
-        
-        return None
+    def _parse_apache_log(self, line: str) -> Optional[Dict]:
+        """Parse Apache access log line (delegates to :mod:`logparser`).
+
+        The returned ``timestamp`` reflects the log entry's own clock from the
+        line (``[10/Oct/2000:13:55:36 -0700]``), not collector read time.
+        """
+        return logparser.parse_apache_log(line, self.server_id)
+
+    def _parse_mysql_log(self, line: str) -> Optional[Dict]:
+        """Parse MySQL log line (delegates to :mod:`logparser`).
+
+        The returned ``timestamp`` is parsed from the line's leading datetime.
+        """
+        return logparser.parse_mysql_log(line, self.server_id)
+
+    def _parse_audit_log(self, line: str) -> Optional[Dict]:
+        """Parse Linux audit log line (delegates to :mod:`logparser`).
+
+        Honours the auditd ``msg=audit(<epoch>):`` timestamp when present.
+        """
+        return logparser.parse_audit_log(line, self.server_id)
+
+    def _parse_system_log(self, line: str, log_type: str) -> Optional[Dict]:
+        """Parse system log line (syslog, auth.log) via :mod:`logparser`."""
+        return logparser.parse_system_log(line, log_type, self.server_id)
     
     def close(self):
         """Close SSH connection and Kafka producer"""

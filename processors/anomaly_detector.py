@@ -1,13 +1,28 @@
 """Anomaly Detection Module for LogAgent"""
 
 import logging
-from typing import Dict, List, Tuple
+import typing
+from typing import Dict, List
 from datetime import datetime, timedelta
-import numpy as np
-from sklearn.ensemble import IsolationForest
-from database import execute_query
 
 logger = logging.getLogger(__name__)
+
+# Heavy external dependencies are imported defensively so the module (and its
+# pure decision helpers) stays importable on hosts without sklearn / a MySQL
+# connector. The detectors that need them degrade gracefully when absent.
+try:
+    from sklearn.ensemble import IsolationForest
+    _HAS_SKLEARN = True
+except ImportError:  # pragma: no cover - exercised only on minimal hosts
+    IsolationForest = typing.cast(typing.Callable, None)
+    _HAS_SKLEARN = False
+
+try:
+    from database import execute_query
+    _HAS_DB = True
+except ImportError:  # pragma: no cover - requires mysql-connector
+    execute_query = typing.cast(typing.Callable, None)
+    _HAS_DB = False
 
 
 class AnomalyDetector:
@@ -17,7 +32,7 @@ class AnomalyDetector:
         self.isolation_forest = IsolationForest(
             contamination=0.05,  # Expect ~5% anomalies
             random_state=42
-        )
+        ) if _HAS_SKLEARN else None
         self.baseline_cache = {}
     
     def detect_spike_anomaly(self, server_id: str, log_type: str, 
@@ -45,7 +60,7 @@ FROM logs
 WHERE server_id = %s AND log_type = %s 
     AND timestamp >= DATE_SUB(NOW(), INTERVAL %s MINUTE)
 GROUP BY DATE_FORMAT(timestamp, '%Y-%m-%d %H:%i:00')
-ORDER BY timestamp DESC
+ORDER BY minute DESC
 """
             
             results = execute_query(query, (server_id, log_type, time_window_minutes * 2), fetch=True)
@@ -74,21 +89,23 @@ ORDER BY timestamp DESC
     
     def detect_unusual_access(self, server_id: str, database: str = None) -> List[Dict]:
         """Detect unusual database access patterns
-        
+
         Args:
             server_id: Server identifier
             database: Target database (optional)
-            
+
         Returns:
             List of detected unusual access anomalies
         """
         try:
-            # Get user baseline for this server
+            # Compare each user's recent access rate against their learned
+            # baseline (user_profiles.avg_queries_per_hour). The baseline column
+            # must be selected AND grouped, otherwise the comparison always sees
+            # a 0 baseline and the check silently never fires.
             query = """
 SELECT 
     u.username,
-    COUNT(*) as access_count,
-    u.typical_accessed_tables,
+    u.avg_queries_per_hour,
     COUNT(*) as recent_count
 FROM logs l
 LEFT JOIN user_profiles u ON l.user = u.username
@@ -96,42 +113,45 @@ WHERE l.server_id = %s
     AND l.log_type IN ('mysql', 'audit')
     AND l.timestamp >= DATE_SUB(NOW(), INTERVAL 1 HOUR)
 """
-            
+            params: List = [server_id]
+
             if database:
                 query += " AND l.database_name = %s"
-                results = execute_query(query, (server_id, database), fetch=True)
-            else:
-                query += " GROUP BY u.username"
-                results = execute_query(query, (server_id,), fetch=True)
-            
+
+            query += " GROUP BY u.username, u.avg_queries_per_hour"
+            if database:
+                params.append(database)
+
+            results = execute_query(query, tuple(params), fetch=True)
+
             anomalies = []
-            
+
             for record in results or []:
                 username = record.get('username')
                 if not username:
                     continue
-                
+
                 recent_count = record.get('recent_count', 0)
-                avg_per_hour = record.get('avg_queries_per_hour', 0)
-                
+                avg_per_hour = record.get('avg_queries_per_hour', 0) or 0
+
                 # Check if access rate is significantly higher
                 if avg_per_hour > 0 and recent_count > (avg_per_hour * 3):
                     anomalies.append({
                         'anomaly_type': 'unusual_access',
                         'severity': 'HIGH' if recent_count > (avg_per_hour * 5) else 'MEDIUM',
-                        'description': f"Unusual access by {username}: {recent_count} ops/hr vs avg {avg_per_hour}",
+                        'description': f"Unusual access by {username}: {recent_count} ops/hr vs avg {avg_per_hour:g}",
                         'confidence_score': min(recent_count / (avg_per_hour * 3), 1.0),
                         'log_type': 'mysql',
                         'server_id': server_id,
                         'user': username
                     })
-            
+
             return anomalies
-            
+
         except Exception as e:
             logger.error(f"Error detecting unusual access: {e}")
             return []
-    
+
     def detect_failed_auth(self, server_id: str, 
                           threshold_per_hour: int = 10) -> List[Dict]:
         """Detect excessive failed authentication attempts
