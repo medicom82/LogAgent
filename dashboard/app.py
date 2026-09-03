@@ -14,9 +14,23 @@ CORS(app)
 
 logger = logging.getLogger(__name__)
 
-# Initialize components
+# Initialize components. Gemini is intentionally lazed so the dashboard can
+# start even when GEMINI_API_KEY is not configured; anomaly analysis simply
+# reports a clean error until an analyzer is available.
 anomaly_detector = get_anomaly_detector()
-gemini_analyzer = get_gemini_analyzer()
+_gemini_analyzer = None
+
+
+def _get_gemini_analyzer():
+    """Return the singleton Gemini analyzer, creating it on first use."""
+    global _gemini_analyzer
+    if _gemini_analyzer is None:
+        try:
+            _gemini_analyzer = get_gemini_analyzer()
+        except Exception as e:
+            logger.error(f"Gemini analyzer unavailable: {e}")
+            return None
+    return _gemini_analyzer
 
 
 # ============================================
@@ -212,9 +226,16 @@ WHERE a.id = %s
             return jsonify({'success': False, 'error': 'Anomaly not found'}), 404
         
         anomaly_data = result[0]
-        
+
+        analyzer = _get_gemini_analyzer()
+        if analyzer is None:
+            return jsonify({
+                'success': False,
+                'error': 'Gemini analyzer is not configured (GEMINI_API_KEY missing)'
+            }), 503
+
         # Analyze with Gemini
-        analysis = gemini_analyzer.analyze_anomaly({
+        analysis = analyzer.analyze_anomaly({
             'anomaly_id': anomaly_id,
             'log_type': anomaly_data.get('log_type'),
             'timestamp': str(anomaly_data.get('detected_at')),
@@ -222,9 +243,9 @@ WHERE a.id = %s
             'description': anomaly_data.get('description'),
             'log_details': anomaly_data.get('raw_log_line', 'N/A')
         })
-        
+
         # Generate query for investigation
-        query_text = gemini_analyzer.generate_query({
+        query_text = analyzer.generate_query({
             'anomaly_id': anomaly_id,
             'anomaly_type': anomaly_data.get('anomaly_type'),
             'server_id': anomaly_data.get('server_id'),

@@ -429,6 +429,30 @@ See [API.md](docs/API.md) for complete API documentation.
 - Audit logging of AI interactions
 - GDPR-compliant data deletion
 
+## 🛠️ Narzędzie CLI (bez zależności)
+
+Pakiet zawiera lekki interfejs wiersza poleceń `logagent`, który **nie wymaga** żadnych ciężkich zależności (MySQL, Kafka, scikit-learn, Gemini) — pozwala szybko sprawdzić wersję i konfigurację środowiska:
+
+```bash
+logagent --version               # logagent 1.0.0
+logagent --check-config          # raport obecności zmiennych środowiskowych
+```
+
+`--check-config` zwraca exit code `1`, gdy brakuje wymaganych zmiennych (`MYSQL_HOST`, `MYSQL_USER`, `MYSQL_DATABASE`) — pomocne przy diagnozowaniu „dashboard nie startuje”.
+
+## 🧪 Testy
+
+Podstawowe moduły (`logparser`, `processors/anomaly_detector`, `cli`) są pokryte testami uruchamianymi **bez** bazy danych i ciężkich zależności (importy są bronione defensywnie, a detekcje niepotrzebujące bazy działają w trybie offline):
+
+```bash
+uv venv .venv --python 3.11
+uv pip install --python .venv/bin/python pytest
+.venv/bin/python -m pytest tests/
+```
+
+Parsowanie logów wydzielono do modułu `logparser.py` (czysty stdlib). `timestamp` wpisu pochodzi teraz **z samej linii logu** (np. `[10/Oct/2000:13:55:36 -0700]`), a nie z zegara kolektora — bez tego okna czasowe wykrywania anomalii, szeregi czasowe dashboardu i korelacja między źródłami są mylące.
+
+## 📖 Dokumentacja
 ## 📈 Performance
 
 - Kafka: 100K+ events/second throughput
